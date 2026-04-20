@@ -151,7 +151,7 @@ Key design choices:
 
 | Feature | Detail |
 |---|---|
-| Optimizer | Muon for 2D weight matrices, AdamW for embeddings/norms |
+| Optimizer | AdamW |
 | Dataset | `HuggingFaceFW/fineweb-edu` (`sample-10BT` by default, swap to `sample-100BT` or `default` for full run) |
 | Tokenizer | `openai/gpt-oss-20b` via `MythosTokenizer` |
 | Parallelism | PyTorch DDP via `torchrun`, sharded streaming dataset |
