@@ -1,159 +1,85 @@
 """
 Hybrid loader — map HuggingFace pretrained weights into OpenMythos Prelude/Coda.
 
-GPU-ONLY loading: weights are streamed directly from safetensors files to CUDA
-without staging the full HF model in CPU RAM. Required for large models that
-do not fit in host memory.
-
-Usage
------
-    from open_mythos.hybrid_loader import load_hf_weights, freeze_pretrained_layers
-    model = OpenMythos(cfg).to("cuda")
-    load_hf_weights(model, "sulpikar2/Qwen3.6-27B-hereticv3")
+Loads weights DIRECTLY to GPU via device_map="cuda". CPU RAM is kept minimal.
 """
-
 from __future__ import annotations
 
-import json
+import gc
 from typing import Optional
 
 import torch
-from huggingface_hub import hf_hub_download
-from safetensors.torch import load_file
+from transformers import AutoModelForCausalLM
 
 
-def _get_tensor(state_dict: dict, key: str, device: torch.device) -> torch.Tensor:
-    if key not in state_dict:
-        raise KeyError(f"Missing expected weight in HF checkpoint: {key}")
-    t = state_dict[key]
-    if t.device != device:
-        t = t.to(device, non_blocking=True)
-    return t
-
-
-def _map_block_full(hf_state: dict, prefix: str, block, loaded: dict, device: torch.device):
-    block.attn.wq.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.self_attn.q_proj.weight", device))
-    block.attn.wk.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.self_attn.k_proj.weight", device))
-    block.attn.wv.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.self_attn.v_proj.weight", device))
-    block.attn.wo.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.self_attn.o_proj.weight", device))
-    block.ffn.gate.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.mlp.gate_proj.weight", device))
-    block.ffn.up.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.mlp.up_proj.weight", device))
-    block.ffn.down.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.mlp.down_proj.weight", device))
-    block.attn_norm.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.input_layernorm.weight", device))
-    block.ffn_norm.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.post_attention_layernorm.weight", device))
-    loaded[f"{prefix}.full"] = True
-
-
-def _map_block_ffn(hf_state: dict, prefix: str, block, loaded: dict, device: torch.device):
-    block.ffn.gate.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.mlp.gate_proj.weight", device))
-    block.ffn.up.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.mlp.up_proj.weight", device))
-    block.ffn.down.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.mlp.down_proj.weight", device))
-    block.attn_norm.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.input_layernorm.weight", device))
-    block.ffn_norm.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.post_attention_layernorm.weight", device))
-    loaded[f"{prefix}.ffn"] = True
+def _map_block(hf_state, prefix, block, device):
+    block.attn.wq.weight.data.copy_(hf_state[f"{prefix}.self_attn.q_proj.weight"].to(device))
+    block.attn.wk.weight.data.copy_(hf_state[f"{prefix}.self_attn.k_proj.weight"].to(device))
+    block.attn.wv.weight.data.copy_(hf_state[f"{prefix}.self_attn.v_proj.weight"].to(device))
+    block.attn.wo.weight.data.copy_(hf_state[f"{prefix}.self_attn.o_proj.weight"].to(device))
+    block.ffn.gate.weight.data.copy_(hf_state[f"{prefix}.mlp.gate_proj.weight"].to(device))
+    block.ffn.up.weight.data.copy_(hf_state[f"{prefix}.mlp.up_proj.weight"].to(device))
+    block.ffn.down.weight.data.copy_(hf_state[f"{prefix}.mlp.down_proj.weight"].to(device))
+    block.attn_norm.weight.data.copy_(hf_state[f"{prefix}.input_layernorm.weight"].to(device))
+    block.ffn_norm.weight.data.copy_(hf_state[f"{prefix}.post_attention_layernorm.weight"].to(device))
 
 
 def load_hf_weights(model, hf_model_id: str, dtype: Optional[torch.dtype] = None):
-    """Load pretrained HF weights DIRECTLY to GPU without CPU staging.
-
-    Args:
-        model: OpenMythos instance (must have attn_type='gqa', already on CUDA).
-        hf_model_id: HuggingFace model ID.
-        dtype: Optional dtype cast (default: keep original dtype).
-    """
     if model.cfg.attn_type != "gqa":
         raise ValueError("Hybrid loading requires attn_type='gqa'.")
 
     device = next(model.parameters()).device
     if device.type != "cuda":
-        raise RuntimeError("Model must be on CUDA before calling load_hf_weights. Call model.to('cuda') first.")
+        raise RuntimeError("Model must be on CUDA. Call model.to('cuda') first.")
 
     print(f"[Hybrid] Loading HF weights DIRECTLY to {device}: {hf_model_id}")
 
-    from transformers import AutoConfig
-    hf_cfg = AutoConfig.from_pretrained(hf_model_id)
-    if hasattr(hf_cfg, "text_config"):
-        c = hf_cfg.text_config
-    else:
-        c = hf_cfg
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        hf_model_id,
+        torch_dtype=dtype or next(model.parameters()).dtype,
+        device_map={"": device},         # <<< force EVERY tensor onto target CUDA
+        low_cpu_mem_usage=True,           # <<< prevents CPU staging
+        offload_state_dict=False,         # <<< never offload to CPU/disk
+    )
+    gc.collect()
 
+    from transformers import AutoConfig
+    cfg = AutoConfig.from_pretrained(hf_model_id)
+    c = getattr(cfg, "text_config", cfg)
     total_layers = c.num_hidden_layers
     layer_types = getattr(c, "layer_types", None)
-    print(f"[Hybrid] HF layers={total_layers}, device={device}")
-
-    try:
-        index_path = hf_hub_download(hf_model_id, filename="model.safetensors.index.json")
-        with open(index_path, "r") as f:
-            index = json.load(f)
-        weight_map = index.get("weight_map", {})
-    except Exception:
-        weight_map = {}
-
-    if weight_map:
-        needed_files = set()
-        for key in weight_map:
-            needed_files.add(weight_map[key])
-    else:
-        needed_files = {"model.safetensors"}
-
-    print(f"[Hybrid] Will load {len(needed_files)} safetensors shard(s)")
-
-    hf_state: dict[str, torch.Tensor] = {}
-    for filename in needed_files:
-        shard_path = hf_hub_download(hf_model_id, filename=filename)
-        print(f"[Hybrid] Loading shard: {filename} -> {device}")
-        shard = load_file(shard_path, device=str(device))
-        hf_state.update(shard)
-        del shard
 
     n_prelude = len(model.prelude)
     n_coda = len(model.coda)
-    loaded_flags: dict = {}
 
-    embed_key = "model.embed_tokens.weight"
-    if embed_key in hf_state:
-        hf_vocab, hf_dim = hf_state[embed_key].shape
-        my_vocab, my_dim = model.embed.weight.shape
-        if hf_dim != my_dim:
-            raise ValueError(f"Embed dim mismatch: HF={hf_dim}, OpenMythos={my_dim}")
-        rows = min(hf_vocab, my_vocab)
-        model.embed.weight.data[:rows].copy_(hf_state[embed_key][:rows])
-        if hf_vocab != my_vocab:
-            print(f"[Hybrid] WARNING vocab mismatch HF={hf_vocab} vs Mythos={my_vocab}; copied {rows} rows.")
+    # --- embed ---
+    rows = min(hf_model.model.embed_tokens.weight.shape[0], model.embed.weight.shape[0])
+    model.embed.weight.data[:rows].copy_(hf_model.model.embed_tokens.weight[:rows])
 
+    # --- prelude ---
     for i in range(n_prelude):
-        prefix = f"model.layers.{i}"
         lt = layer_types[i] if layer_types else "full_attention"
-        if lt == "full_attention":
-            _map_block_full(hf_state, prefix, model.prelude[i], loaded_flags, device)
-        else:
-            print(f"[Hybrid] Prelude layer {i} is '{lt}'; loading FFN+norm only, attention kept random.")
-            _map_block_ffn(hf_state, prefix, model.prelude[i], loaded_flags, device)
+        _map_block(hf_model.model.layers[i].state_dict(), f"model.layers.{i}", model.prelude[i], device)
+        if lt != "full_attention":
+            print(f"[Hybrid] Prelude layer {i} is '{lt}'; attention weights loaded anyway (FFN+norm used)")
 
+    # --- coda ---
     for j in range(n_coda):
-        hf_idx = total_layers - n_coda + j
-        prefix = f"model.layers.{hf_idx}"
-        lt = layer_types[hf_idx] if layer_types else "full_attention"
-        if lt == "full_attention":
-            _map_block_full(hf_state, prefix, model.coda[j], loaded_flags, device)
-        else:
-            print(f"[Hybrid] Coda layer {j} (HF idx {hf_idx}) is '{lt}'; loading FFN+norm only, attention kept random.")
-            _map_block_ffn(hf_state, prefix, model.coda[j], loaded_flags, device)
+        idx = total_layers - n_coda + j
+        lt = layer_types[idx] if layer_types else "full_attention"
+        _map_block(hf_model.model.layers[idx].state_dict(), f"model.layers.{idx}", model.coda[j], device)
+        if lt != "full_attention":
+            print(f"[Hybrid] Coda layer {j} is '{lt}'; attention weights loaded anyway")
 
-    if "model.norm.weight" in hf_state:
-        model.norm.weight.data.copy_(hf_state["model.norm.weight"])
+    # --- norm & head ---
+    model.norm.weight.data.copy_(hf_model.model.norm.weight)
+    if model.head.weight.shape == hf_model.lm_head.weight.shape:
+        model.head.weight.data.copy_(hf_model.lm_head.weight)
 
-    if "lm_head.weight" in hf_state:
-        hf_v, hf_d = hf_state["lm_head.weight"].shape
-        my_v, my_d = model.head.weight.shape
-        if hf_d == my_d and hf_v == my_v:
-            model.head.weight.data.copy_(hf_state["lm_head.weight"])
-        else:
-            print(f"[Hybrid] lm_head shape mismatch ({hf_v},{hf_d}) vs ({my_v},{my_d}); skipped.")
-
-    print(f"[Hybrid] Loaded {len(loaded_flags)} HF sub-layers into OpenMythos on {device}.")
-    del hf_state
+    del hf_model
+    gc.collect()
     torch.cuda.empty_cache()
+    print(f"[Hybrid] Done. RecurrentBlock remains randomly initialised.")
 
 
 def freeze_pretrained_layers(
@@ -164,9 +90,7 @@ def freeze_pretrained_layers(
     freeze_norm: bool = True,
     freeze_head: bool = False,
 ):
-    """Freeze layers carrying pretrained HF weights; leave RecurrentBlock trainable."""
-    trainable = 0
-    frozen = 0
+    trainable = frozen = 0
     for name, param in model.named_parameters():
         should_freeze = False
         if freeze_embed and "embed" in name:
@@ -180,11 +104,10 @@ def freeze_pretrained_layers(
         if freeze_head and "head" in name:
             should_freeze = True
 
+        param.requires_grad = not should_freeze
         if should_freeze:
-            param.requires_grad = False
             frozen += param.numel()
         else:
-            param.requires_grad = True
             trainable += param.numel()
 
     total = trainable + frozen
