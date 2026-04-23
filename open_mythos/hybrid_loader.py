@@ -1,168 +1,159 @@
 """
 Hybrid loader — map HuggingFace pretrained weights into OpenMythos Prelude/Coda.
 
-Supports standard Llama/Qwen/Mistral weight naming with SwiGLU MLP.
-Also supports Qwen3.5 hybrid attention (linear + full) by loading only
-full-attention layers into OpenMythos GQA blocks and FFN weights from
-linear-attention layers.
+GPU-ONLY loading: weights are streamed directly from safetensors files to CUDA
+without staging the full HF model in CPU RAM. Required for large models that
+do not fit in host memory.
 
 Usage
 -----
     from open_mythos.hybrid_loader import load_hf_weights, freeze_pretrained_layers
-
-    model = OpenMythos(cfg)
+    model = OpenMythos(cfg).to("cuda")
     load_hf_weights(model, "sulpikar2/Qwen3.6-27B-hereticv3")
-    freeze_pretrained_layers(model)
-
-Design
-------
-* embed, final norm, lm_head  →  loaded directly
-* Prelude / Coda blocks  →  mapped from HF ``model.layers.*``
-* RecurrentBlock (MoE, LTI, ACT, LoRA)  →  kept random (the trainable novel part)
-
-Compatibility
--------------
-OpenMythos must be configured with ``attn_type="gqa"`` because standard HF
-models (including Qwen3.5) do not implement MLA.
 """
 
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 import torch
-from transformers import AutoModelForCausalLM
+from huggingface_hub import hf_hub_download
+from safetensors.torch import load_file
 
 
-def _get_weight(state_dict: dict, key: str) -> torch.Tensor:
+def _get_tensor(state_dict: dict, key: str, device: torch.device) -> torch.Tensor:
     if key not in state_dict:
         raise KeyError(f"Missing expected weight in HF checkpoint: {key}")
-    return state_dict[key]
+    t = state_dict[key]
+    if t.device != device:
+        t = t.to(device, non_blocking=True)
+    return t
 
 
-def _map_block_ffn(hf_state: dict, prefix: str, block, loaded: dict):
-    """Copy only FFN weights from a HF layer into an OpenMythos TransformerBlock."""
-    block.ffn.gate.weight.copy_(_get_weight(hf_state, f"{prefix}.mlp.gate_proj.weight"))
-    block.ffn.up.weight.copy_(_get_weight(hf_state, f"{prefix}.mlp.up_proj.weight"))
-    block.ffn.down.weight.copy_(_get_weight(hf_state, f"{prefix}.mlp.down_proj.weight"))
-    block.attn_norm.weight.copy_(_get_weight(hf_state, f"{prefix}.input_layernorm.weight"))
-    block.ffn_norm.weight.copy_(_get_weight(hf_state, f"{prefix}.post_attention_layernorm.weight"))
-    loaded[f"{prefix}.ffn"] = True
-
-
-def _map_block_full(hf_state: dict, prefix: str, block, loaded: dict):
-    """Copy full block (attention + FFN + norms) from a HF layer."""
-    block.attn.wq.weight.copy_(_get_weight(hf_state, f"{prefix}.self_attn.q_proj.weight"))
-    block.attn.wk.weight.copy_(_get_weight(hf_state, f"{prefix}.self_attn.k_proj.weight"))
-    block.attn.wv.weight.copy_(_get_weight(hf_state, f"{prefix}.self_attn.v_proj.weight"))
-    block.attn.wo.weight.copy_(_get_weight(hf_state, f"{prefix}.self_attn.o_proj.weight"))
-    block.ffn.gate.weight.copy_(_get_weight(hf_state, f"{prefix}.mlp.gate_proj.weight"))
-    block.ffn.up.weight.copy_(_get_weight(hf_state, f"{prefix}.mlp.up_proj.weight"))
-    block.ffn.down.weight.copy_(_get_weight(hf_state, f"{prefix}.mlp.down_proj.weight"))
-    block.attn_norm.weight.copy_(_get_weight(hf_state, f"{prefix}.input_layernorm.weight"))
-    block.ffn_norm.weight.copy_(_get_weight(hf_state, f"{prefix}.post_attention_layernorm.weight"))
+def _map_block_full(hf_state: dict, prefix: str, block, loaded: dict, device: torch.device):
+    block.attn.wq.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.self_attn.q_proj.weight", device))
+    block.attn.wk.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.self_attn.k_proj.weight", device))
+    block.attn.wv.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.self_attn.v_proj.weight", device))
+    block.attn.wo.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.self_attn.o_proj.weight", device))
+    block.ffn.gate.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.mlp.gate_proj.weight", device))
+    block.ffn.up.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.mlp.up_proj.weight", device))
+    block.ffn.down.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.mlp.down_proj.weight", device))
+    block.attn_norm.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.input_layernorm.weight", device))
+    block.ffn_norm.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.post_attention_layernorm.weight", device))
     loaded[f"{prefix}.full"] = True
 
 
-def _detect_hf_config(hf_model) -> tuple[int, int, int, int, int, list[str] | None]:
-    """Return (hidden_size, n_layers, n_heads, n_kv_heads, vocab_size, layer_types)."""
-    cfg = hf_model.config
-    # Qwen3.5 nests text config
-    if hasattr(cfg, "text_config"):
-        cfg = cfg.text_config
-    layer_types = getattr(cfg, "layer_types", None)
-    return (
-        cfg.hidden_size,
-        cfg.num_hidden_layers,
-        cfg.num_attention_heads,
-        getattr(cfg, "num_key_value_heads", cfg.num_attention_heads),
-        cfg.vocab_size,
-        layer_types,
-    )
+def _map_block_ffn(hf_state: dict, prefix: str, block, loaded: dict, device: torch.device):
+    block.ffn.gate.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.mlp.gate_proj.weight", device))
+    block.ffn.up.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.mlp.up_proj.weight", device))
+    block.ffn.down.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.mlp.down_proj.weight", device))
+    block.attn_norm.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.input_layernorm.weight", device))
+    block.ffn_norm.weight.data.copy_(_get_tensor(hf_state, f"{prefix}.post_attention_layernorm.weight", device))
+    loaded[f"{prefix}.ffn"] = True
 
 
-def load_hf_weights(model, hf_model_id: str, dtype: Optional[torch.dtype] = None, device: str = "cpu"):
-    """Load pretrained HF weights into compatible Prelude / Coda / Embed layers.
+def load_hf_weights(model, hf_model_id: str, dtype: Optional[torch.dtype] = None):
+    """Load pretrained HF weights DIRECTLY to GPU without CPU staging.
 
     Args:
-        model: OpenMythos instance (must have ``attn_type="gqa"``).
+        model: OpenMythos instance (must have attn_type='gqa', already on CUDA).
         hf_model_id: HuggingFace model ID.
-        dtype: torch dtype for the loaded checkpoint (default = model dtype).
-        device: Where to stage the HF model before copying (default ``"cpu"``).
-
-    Raises:
-        ValueError: If ``model.cfg.attn_type != "gqa"``.
+        dtype: Optional dtype cast (default: keep original dtype).
     """
     if model.cfg.attn_type != "gqa":
-        raise ValueError("Hybrid loading requires attn_type='gqa'. Standard HF models do not implement MLA.")
+        raise ValueError("Hybrid loading requires attn_type='gqa'.")
 
-    print(f"[Hybrid] Loading HF weights from: {hf_model_id}")
-    hf_model = AutoModelForCausalLM.from_pretrained(
-        hf_model_id,
-        torch_dtype=dtype or next(model.parameters()).dtype,
-        device_map=device,
-        low_cpu_mem_usage=True,
-    )
-    hf_state = hf_model.state_dict()
+    device = next(model.parameters()).device
+    if device.type != "cuda":
+        raise RuntimeError("Model must be on CUDA before calling load_hf_weights. Call model.to('cuda') first.")
 
-    # --- inspect HF architecture before deleting model ---
-    hf_hidden, hf_layers, hf_heads, hf_kv_heads, hf_vocab, layer_types = _detect_hf_config(hf_model)
-    del hf_model  # free memory
+    print(f"[Hybrid] Loading HF weights DIRECTLY to {device}: {hf_model_id}")
 
-    print(f"[Hybrid] HF arch: layers={hf_layers}, dim={hf_hidden}, heads={hf_heads}/{hf_kv_heads}, vocab={hf_vocab}")
+    from transformers import AutoConfig
+    hf_cfg = AutoConfig.from_pretrained(hf_model_id)
+    if hasattr(hf_cfg, "text_config"):
+        c = hf_cfg.text_config
+    else:
+        c = hf_cfg
 
-    # --- embedding ---
+    total_layers = c.num_hidden_layers
+    layer_types = getattr(c, "layer_types", None)
+    print(f"[Hybrid] HF layers={total_layers}, device={device}")
+
+    try:
+        index_path = hf_hub_download(hf_model_id, filename="model.safetensors.index.json")
+        with open(index_path, "r") as f:
+            index = json.load(f)
+        weight_map = index.get("weight_map", {})
+    except Exception:
+        weight_map = {}
+
+    if weight_map:
+        needed_files = set()
+        for key in weight_map:
+            needed_files.add(weight_map[key])
+    else:
+        needed_files = {"model.safetensors"}
+
+    print(f"[Hybrid] Will load {len(needed_files)} safetensors shard(s)")
+
+    hf_state: dict[str, torch.Tensor] = {}
+    for filename in needed_files:
+        shard_path = hf_hub_download(hf_model_id, filename=filename)
+        print(f"[Hybrid] Loading shard: {filename} -> {device}")
+        shard = load_file(shard_path, device=str(device))
+        hf_state.update(shard)
+        del shard
+
+    n_prelude = len(model.prelude)
+    n_coda = len(model.coda)
+    loaded_flags: dict = {}
+
     embed_key = "model.embed_tokens.weight"
     if embed_key in hf_state:
-        hf_vocab_real, hf_dim = hf_state[embed_key].shape
+        hf_vocab, hf_dim = hf_state[embed_key].shape
         my_vocab, my_dim = model.embed.weight.shape
         if hf_dim != my_dim:
             raise ValueError(f"Embed dim mismatch: HF={hf_dim}, OpenMythos={my_dim}")
-        rows = min(hf_vocab_real, my_vocab)
+        rows = min(hf_vocab, my_vocab)
         model.embed.weight.data[:rows].copy_(hf_state[embed_key][:rows])
-        if hf_vocab_real != my_vocab:
-            print(f"[Hybrid] WARNING vocab mismatch HF={hf_vocab_real} vs Mythos={my_vocab}; copied {rows} rows.")
-    else:
-        print("[Hybrid] embed_tokens.weight not found; skipped.")
+        if hf_vocab != my_vocab:
+            print(f"[Hybrid] WARNING vocab mismatch HF={hf_vocab} vs Mythos={my_vocab}; copied {rows} rows.")
 
-    # --- Prelude: first N layers ---
-    loaded_flags: dict = {}
-    n_prelude = len(model.prelude)
     for i in range(n_prelude):
         prefix = f"model.layers.{i}"
         lt = layer_types[i] if layer_types else "full_attention"
         if lt == "full_attention":
-            _map_block_full(hf_state, prefix, model.prelude[i], loaded_flags)
+            _map_block_full(hf_state, prefix, model.prelude[i], loaded_flags, device)
         else:
             print(f"[Hybrid] Prelude layer {i} is '{lt}'; loading FFN+norm only, attention kept random.")
-            _map_block_ffn(hf_state, prefix, model.prelude[i], loaded_flags)
+            _map_block_ffn(hf_state, prefix, model.prelude[i], loaded_flags, device)
 
-    # --- Coda: last M layers ---
-    n_coda = len(model.coda)
     for j in range(n_coda):
-        hf_idx = hf_layers - n_coda + j
+        hf_idx = total_layers - n_coda + j
         prefix = f"model.layers.{hf_idx}"
         lt = layer_types[hf_idx] if layer_types else "full_attention"
         if lt == "full_attention":
-            _map_block_full(hf_state, prefix, model.coda[j], loaded_flags)
+            _map_block_full(hf_state, prefix, model.coda[j], loaded_flags, device)
         else:
             print(f"[Hybrid] Coda layer {j} (HF idx {hf_idx}) is '{lt}'; loading FFN+norm only, attention kept random.")
-            _map_block_ffn(hf_state, prefix, model.coda[j], loaded_flags)
+            _map_block_ffn(hf_state, prefix, model.coda[j], loaded_flags, device)
 
-    # --- final norm ---
     if "model.norm.weight" in hf_state:
-        model.norm.weight.copy_(hf_state["model.norm.weight"])
+        model.norm.weight.data.copy_(hf_state["model.norm.weight"])
 
-    # --- lm_head ---
     if "lm_head.weight" in hf_state:
         hf_v, hf_d = hf_state["lm_head.weight"].shape
         my_v, my_d = model.head.weight.shape
         if hf_d == my_d and hf_v == my_v:
-            model.head.weight.copy_(hf_state["lm_head.weight"])
+            model.head.weight.data.copy_(hf_state["lm_head.weight"])
         else:
             print(f"[Hybrid] lm_head shape mismatch ({hf_v},{hf_d}) vs ({my_v},{my_d}); skipped.")
 
-    print(f"[Hybrid] Loaded {len(loaded_flags)} HF sub-layers into OpenMythos.")
+    print(f"[Hybrid] Loaded {len(loaded_flags)} HF sub-layers into OpenMythos on {device}.")
+    del hf_state
+    torch.cuda.empty_cache()
 
 
 def freeze_pretrained_layers(
@@ -198,5 +189,4 @@ def freeze_pretrained_layers(
 
     total = trainable + frozen
     print(f"[Freeze] Frozen {frozen:,} ({frozen/total:.1%}) | Trainable {trainable:,} ({trainable/total:.1%})")
-    rec_trainable = any(p.requires_grad for p in model.recurrent.parameters())
-    print(f"[Freeze] RecurrentBlock trainable: {rec_trainable}")
+    print(f"[Freeze] RecurrentBlock trainable: {any(p.requires_grad for p in model.recurrent.parameters())}")
