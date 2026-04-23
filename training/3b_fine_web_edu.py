@@ -31,8 +31,9 @@ from datasets import load_dataset
 
 from open_mythos import OpenMythos
 from open_mythos.main import TransformerBlock, RecurrentBlock
-from open_mythos.variants import mythos_3b
+from open_mythos.variants import mythos_3b, from_hf_config
 from open_mythos.tokenizer import MythosTokenizer
+from open_mythos.hybrid_loader import load_hf_weights, freeze_pretrained_layers
 
 # --- Hybrid loading ----------------------------------------------------------
 # Set BASE_MODEL to a HuggingFace model ID to load pretrained weights into
