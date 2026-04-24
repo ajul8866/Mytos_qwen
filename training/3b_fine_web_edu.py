@@ -39,7 +39,7 @@ from open_mythos.hybrid_loader import load_hf_weights, freeze_pretrained_layers
 # --- Hybrid loading ----------------------------------------------------------
 # Set BASE_MODEL to a HuggingFace model ID to load pretrained weights into
 # Prelude / Coda / Embed.  Set None for random init (original behaviour).
-BASE_MODEL: str | None = "sulpikar2/Qwen3.6-27B-hereticv3"
+BASE_MODEL: str | None = "unsloth/Qwen2.5-7B-Instruct"
 FREEZE_PRELUDE = True
 FREEZE_CODA = True
 FREEZE_EMBED = True
