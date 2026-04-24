@@ -62,6 +62,8 @@ class MythosConfig:
     n_shared_experts: int = 2
     n_experts_per_tok: int = 4  # top-K routed
     expert_dim: int = 512  # fine-grained: dim // (n_experts // n_experts_per_tok)
+    # Dense FFN intermediate dim (prelude/coda); 0 = compute as dim*4//3
+    intermediate_size: int = 0
     # ACT halting
     act_threshold: float = 0.99
     # RoPE
@@ -619,7 +621,8 @@ class TransformerBlock(nn.Module):
         self.attn_norm = RMSNorm(cfg.dim)
         self.ffn_norm = RMSNorm(cfg.dim)
         self.attn = MLAttention(cfg) if cfg.attn_type == "mla" else GQAttention(cfg)
-        self.ffn = MoEFFN(cfg) if use_moe else Expert(cfg.dim, cfg.dim * 4 // 3)
+        ffn_dim = cfg.intermediate_size or cfg.dim * 4 // 3
+        self.ffn = MoEFFN(cfg) if use_moe else Expert(cfg.dim, ffn_dim)
         self.resid_drop = nn.Dropout(cfg.dropout)
 
     def forward(

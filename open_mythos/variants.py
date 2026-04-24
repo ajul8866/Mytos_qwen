@@ -62,6 +62,7 @@ def from_hf_config(hf_cfg) -> MythosConfig:
         n_experts=n_experts,
         n_shared_experts=n_shared,
         n_experts_per_tok=topk,
+        intermediate_size=intermediate_size,
         expert_dim=intermediate_size // topk,
         act_threshold=0.99,
         rope_theta=rope_theta,
