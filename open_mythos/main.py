@@ -74,6 +74,8 @@ class MythosConfig:
     max_output_tokens: int = 4096
     # Dropout (set 0.0 to disable; 0.1 is standard for pretraining)
     dropout: float = 0.0
+    # Gradient checkpointing in RecurrentBlock (saves VRAM at the cost of recomputation)
+    grad_ckpt: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -825,26 +827,35 @@ class RecurrentBlock(nn.Module):
         n_loops = n_loops or self.cfg.max_loop_iters
         B, T, D = h.shape
 
+        use_ckpt = self.training and self.cfg.grad_ckpt
+
         halted = torch.zeros(B, T, device=h.device, dtype=torch.bool)
         cumulative_p = torch.zeros(B, T, device=h.device)
         h_out = torch.zeros_like(h)
 
         for t in range(n_loops):
-            h_loop = loop_index_embedding(h, t, self.loop_dim)
-            combined = self.norm(h_loop + e)
-            cache_key = f"recurrent_loop_{t}"
-            trans_out = self.block(combined, freqs_cis, mask, kv_cache, cache_key)
+            if use_ckpt:
+                h_loop = torch.utils.checkpoint.checkpoint(
+                    loop_index_embedding, h, t, self.loop_dim,
+                    use_reentrant=False,
+                )
+                combined = self.norm(h_loop + e)
+                trans_out = torch.utils.checkpoint.checkpoint(
+                    self.block, combined, freqs_cis, mask, kv_cache,
+                    f"recurrent_loop_{t}",
+                    use_reentrant=False,
+                )
+            else:
+                h_loop = loop_index_embedding(h, t, self.loop_dim)
+                combined = self.norm(h_loop + e)
+                cache_key = f"recurrent_loop_{t}"
+                trans_out = self.block(combined, freqs_cis, mask, kv_cache, cache_key)
             trans_out = trans_out + self.lora(trans_out, t)
             h = self.injection(h, e, trans_out)
 
             p = self.act(h)  # (B, T)
             still_running = ~halted
 
-            # ACT remainder trick: once cumulative_p + p crosses threshold,
-            # assign the remaining probability mass as the final weight.
-            # Gate by still_running so halted positions contribute exactly
-            # once (on the halting step) and zero thereafter — otherwise
-            # threshold<1 leaves a non-zero remainder that leaks every step.
             remainder = (1.0 - cumulative_p).clamp(min=0)
             weight = torch.where(
                 cumulative_p + p >= self.cfg.act_threshold,
@@ -857,9 +868,6 @@ class RecurrentBlock(nn.Module):
             cumulative_p = cumulative_p + p * still_running.float()
             halted = halted | (cumulative_p >= self.cfg.act_threshold)
 
-            # Only short-circuit when there is no KV cache to keep consistent.
-            # With a cache, every loop depth must run on every forward pass so
-            # later decode steps find populated keys at every cache_key.
             if halted.all() and kv_cache is None:
                 break
 

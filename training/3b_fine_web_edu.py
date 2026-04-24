@@ -44,6 +44,8 @@ FREEZE_PRELUDE = True
 FREEZE_CODA = True
 FREEZE_EMBED = True
 FREEZE_HEAD = False
+# Gradient checkpointing — trades compute for VRAM; essential for recurrent blocks
+GRAD_CKPT = True
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +386,7 @@ def main():
     # Hyperparameters
     # ------------------------------------------------------------------
     seq_len = 2048
-    micro_batch = 4
+    micro_batch = 1 if world_size == 1 else 4  # reduce for single-GPU VRAM
     target_tokens = 30_000_000_000
     grad_accum = max(1, 256 // (world_size * micro_batch))
     global_batch_tok = world_size * micro_batch * grad_accum * seq_len
@@ -413,6 +415,7 @@ def main():
         cfg = from_hf_config(hf_cfg)
         cfg.vocab_size = vocab_size
         cfg.max_seq_len = seq_len
+        cfg.grad_ckpt = GRAD_CKPT
         if master:
             logger.info(f"HF base model: {BASE_MODEL}")
             logger.info(f"OpenMythos config auto-derived: dim={cfg.dim}, layers={cfg.prelude_layers}+{cfg.max_loop_iters}+{cfg.coda_layers}, heads={cfg.n_heads}/{cfg.n_kv_heads}")
