@@ -394,7 +394,7 @@ def main():
     warmup_steps = 2000
     lr = 3e-4
     wd = 0.1
-    log_every = 10
+    log_every = 1
     ckpt_every = 1000
     ckpt_dir = "checkpoints"
     dataset_subset = "sample-10BT"  # → sample-100BT or "default" for full run
