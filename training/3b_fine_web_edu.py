@@ -388,7 +388,7 @@ def main():
     seq_len = 2048
     micro_batch = 1 if world_size == 1 else 4  # reduce for single-GPU VRAM
     target_tokens = 30_000_000_000
-    grad_accum = max(1, 256 // (world_size * micro_batch))
+    grad_accum = max(1, 8 // (world_size * micro_batch))  # small accum for fast feedback
     global_batch_tok = world_size * micro_batch * grad_accum * seq_len
     total_steps = target_tokens // global_batch_tok
     warmup_steps = 2000
@@ -553,6 +553,11 @@ def main():
 
             loss.backward()
             loss_accum += loss.item()
+
+            if master and (micro_step + 1) % max(1, grad_accum // 4) == 0:
+                logger.info(
+                    f"  micro {micro_step+1}/{grad_accum} | loss {loss.item() * grad_accum:.4f}"
+                )
 
         # FSDP shards parameters, so `nn.utils.clip_grad_norm_` would clip
         # against each rank's local norm and miss the cross-shard gather.
