@@ -412,6 +412,10 @@ def main():
         cfg.max_seq_len = seq_len
         cfg.max_output_tokens = seq_len
         cfg.grad_ckpt = GRAD_CKPT
+        # Use ALL 28 Qwen layers: 14 prelude + 14 coda, 0 discarded
+        cfg.prelude_layers = hf_cfg.num_hidden_layers // 2
+        cfg.coda_layers = hf_cfg.num_hidden_layers - cfg.prelude_layers
+        cfg.max_loop_iters = 1  # minimal loop until RecurrentBlock is trained
         # Override: fewer experts = faster training, less VRAM
         cfg.n_experts = 32
         cfg.n_shared_experts = 2
