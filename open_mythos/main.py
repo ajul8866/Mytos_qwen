@@ -796,6 +796,16 @@ class RecurrentBlock(nn.Module):
         self.act = ACTHalting(cfg.dim)
         self.lora = LoRAAdapter(cfg.dim, cfg.lora_rank, cfg.max_loop_iters)
         self.norm = RMSNorm(cfg.dim)
+
+        # Scale down recurrent-block weights at init so the random block
+        # starts near identity (small residual contribution). This prevents
+        # the untrained block from destroying pretrained prelude/coda
+        # representations and keeps initial gradient norms reasonable.
+        with torch.no_grad():
+            for p in self.block.parameters():
+                p.mul_(0.01)
+            for p in self.lora.parameters():
+                p.mul_(0.01)
         self.loop_dim = (
             cfg.dim // 8
         )  # fraction of channels receiving loop-index embedding
