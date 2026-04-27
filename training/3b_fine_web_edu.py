@@ -415,7 +415,7 @@ def main():
         # Use ALL 28 Qwen layers: 14 prelude + 14 coda, 0 discarded
         cfg.prelude_layers = hf_cfg.num_hidden_layers // 2
         cfg.coda_layers = hf_cfg.num_hidden_layers - cfg.prelude_layers
-        cfg.max_loop_iters = 5
+        cfg.max_loop_iters = 14  # cap; start at 1 loop, +1 per 100 steps
         # Override: fewer experts = faster training, less VRAM
         cfg.n_experts = 32
         cfg.n_shared_experts = 2
@@ -497,6 +497,11 @@ def main():
         model.parameters(), lr=lr, weight_decay=wd, betas=(0.9, 0.95), fused=False
     )
 
+    # Dynamic loop curriculum: start at 1 loop, +1 every 100 steps, cap at cfg.max_loop_iters
+    current_loops = 1
+    if master:
+        logger.info(f"[LOOP] curriculum: start={current_loops} +1/100step cap={cfg.max_loop_iters}")
+
     # ------------------------------------------------------------------
     # Resume from latest checkpoint (if any)
     # ------------------------------------------------------------------
@@ -554,7 +559,7 @@ def main():
                 else model.no_sync()
             )
             with sync, amp_ctx:
-                logits = model(x)
+                logits = model(x, n_loops=current_loops)
                 if step == start_step and micro_step == 0 and master:
                     with torch.no_grad():
                         ls = logits.detach().float()
@@ -585,6 +590,13 @@ def main():
             grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
         step += 1
+
+        # Loop curriculum: +1 loop every 100 steps, cap at max_loop_iters
+        new_loops = min(1 + step // 100, cfg.max_loop_iters)
+        if new_loops != current_loops:
+            current_loops = new_loops
+            if master:
+                logger.info(f"[LOOP] increased to {current_loops} loops at step {step}")
 
         if master and step % log_every == 0:
             dt = time.perf_counter() - t0
