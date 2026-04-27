@@ -242,12 +242,12 @@ class GQAttention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        scale = self.head_dim**-0.5
-        attn = torch.matmul(q, k.transpose(-2, -1)) * scale
-        if mask is not None:
-            attn = attn + mask
-        attn = self.attn_drop(F.softmax(attn, dim=-1))
-        out = torch.matmul(attn, v)
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=mask,
+            dropout_p=self.attn_drop.p if self.training else 0.0,
+            is_causal=(mask is None and T > 1),
+        )
         out = out.transpose(1, 2).contiguous().view(B, T, -1)
         return self.wo(out)
 
@@ -995,7 +995,7 @@ class OpenMythos(nn.Module):
         freqs_cis = (
             self.freqs_cis_mla if self.cfg.attn_type == "mla" else self.freqs_cis
         )[start_pos : start_pos + T]
-        mask = self._causal_mask(T, device) if T > 1 else None
+        mask = self._causal_mask(T, device) if T > 1 and self.cfg.attn_type == "mla" else None
 
         for i, layer in enumerate(self.prelude):
             x = layer(x, freqs_cis, mask, kv_cache, cache_key=f"prelude_{i}")
