@@ -395,7 +395,7 @@ def main():
     lr = 1e-5
     wd = 0.1
     log_every = 1
-    ckpt_every = 1000
+    ckpt_every = 100
     ckpt_dir = "checkpoints"
     dataset_subset = "sample-10BT"  # → sample-100BT or "default" for full run
 
