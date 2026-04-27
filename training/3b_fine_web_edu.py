@@ -458,6 +458,9 @@ def main():
     gc.collect()
     torch.cuda.empty_cache()
 
+    # Sync local variable with model's actual vocab_size (may differ from tokenizer's)
+    vocab_size = cfg.vocab_size
+
     if ddp:
         mp_policy = MixedPrecision(
             param_dtype=amp_dtype,
