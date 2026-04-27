@@ -385,8 +385,8 @@ def main():
     # ------------------------------------------------------------------
     # Hyperparameters
     # ------------------------------------------------------------------
-    seq_len = 4096
-    micro_batch = 2 if world_size == 1 else 4  # 2 fits on 80GB A100 with seq_len=4096
+    seq_len = 2048
+    micro_batch = 2 if world_size == 1 else 4  # fits on 80GB A100 with seq_len=2048
     target_tokens = 5_000_000_000  # 5B tokens ~ 1-2 hari (ganti ke 30B untuk full run)
     grad_accum = max(1, 8 // (world_size * micro_batch))
     global_batch_tok = world_size * micro_batch * grad_accum * seq_len
