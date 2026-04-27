@@ -796,16 +796,6 @@ class RecurrentBlock(nn.Module):
         self.act = ACTHalting(cfg.dim)
         self.lora = LoRAAdapter(cfg.dim, cfg.lora_rank, cfg.max_loop_iters)
         self.norm = RMSNorm(cfg.dim)
-
-        # Scale down recurrent-block weights at init so the random block
-        # starts near identity (small residual contribution). This prevents
-        # the untrained block from destroying pretrained prelude/coda
-        # representations and keeps initial gradient norms reasonable.
-        with torch.no_grad():
-            for p in self.block.parameters():
-                p.mul_(0.01)
-            for p in self.lora.parameters():
-                p.mul_(0.01)
         self.loop_dim = (
             cfg.dim // 8
         )  # fraction of channels receiving loop-index embedding
@@ -950,6 +940,14 @@ class OpenMythos(nn.Module):
         self.head.weight = self.embed.weight  # weight tying
 
         self._init_weights()
+        # Re-scale recurrent block after _init_weights overwrites it.
+        # The random block must start near-identity so it does not destroy
+        # pretrained Prelude/Coda representations during the first N steps.
+        with torch.no_grad():
+            for p in self.recurrent.block.parameters():
+                p.mul_(0.01)
+            for p in self.recurrent.lora.parameters():
+                p.mul_(0.01)
 
     def _init_weights(self) -> None:
         """Initialize all linear and embedding weights with N(0, 0.02)."""
