@@ -552,6 +552,14 @@ def main():
             )
             with sync, amp_ctx:
                 logits = model(x)
+                if step == start_step and micro_step == 0 and master:
+                    with torch.no_grad():
+                        ls = logits.detach().float()
+                        logger.info(f"[DIAG] logits: mean={ls.mean():.2f} std={ls.std():.2f} min={ls.min():.2f} max={ls.max():.2f}")
+                        target_ids = y.view(-1)
+                        pred_ids = ls.argmax(dim=-1).view(-1)
+                        acc = (pred_ids == target_ids).float().mean()
+                        logger.info(f"[DIAG] top1 accuracy: {acc:.4f} (random≈{1/vocab_size:.6f})")
                 loss = nn.functional.cross_entropy(
                     logits.view(-1, vocab_size), y.view(-1)
                 )
