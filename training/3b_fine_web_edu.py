@@ -570,9 +570,9 @@ def main():
         # against each rank's local norm and miss the cross-shard gather.
         # FSDP.clip_grad_norm_ computes the true global norm and returns it.
         if ddp:
-            grad_norm = model.clip_grad_norm_(1.0)
+            grad_norm = model.clip_grad_norm_(5.0)
         else:
-            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
         step += 1
 
