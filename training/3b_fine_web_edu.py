@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-OpenMythos pretraining on FineWeb-Edu with FSDP + AdamW.
+OpenMythos pretraining on DCLM-Baseline with FSDP + AdamW.
+
+DCLM (DataComp-LM) is a high-quality pretraining corpus. 2.6T tokens
+of DCLM matches Llama 3 8B trained on 15T+ tokens (~6× more efficient).
 
 Single GPU:
     python training/3b_fine_web_edu.py
@@ -53,15 +56,17 @@ GRAD_CKPT = True
 # ---------------------------------------------------------------------------
 
 
-class FineWebEduDataset(IterableDataset):
+class DCLMDataset(IterableDataset):
     """
-    Streaming FineWeb-Edu loader yielding fixed-length (input, target) pairs.
+    Streaming DCLM-Baseline loader yielding fixed-length (input, target) pairs.
 
-    FineWeb-Edu is trillions of tokens, so `streaming=True` pulls shards on
-    demand instead of materializing to disk. Sharding is two-dimensional —
-    `world_size` ranks × `num_workers` DataLoader workers per rank — and each
-    `(rank, worker_id)` deterministically owns one shard of the global stream.
-    That gives disjoint coverage without any cross-process coordination.
+    DCLM (DataComp-LM) is a high-quality pretraining corpus from Apple.
+    2.6T tokens of DCLM matches Llama 3 8B trained on 15T+ tokens —
+    ~6× more compute efficient. Streaming pulls shards on demand.
+
+    Sharding is two-dimensional — `world_size` ranks × `num_workers`
+    DataLoader workers per rank — and each `(rank, worker_id)`
+    deterministically owns one shard of the global stream.
 
     Streaming datasets are not seekable, so a resumed run re-enters its shard
     from the beginning. Acceptable at pretraining scale: the chance of
@@ -69,31 +74,22 @@ class FineWebEduDataset(IterableDataset):
     cost of a true resumable loader.
     """
 
-    def __init__(self, encoding, seq_len: int, subset: str, rank: int, world_size: int):
+    def __init__(self, encoding, seq_len: int, rank: int, world_size: int):
         """
         Args:
             encoding   -- tokenizer exposing `.encode(str) -> list[int]`
             seq_len    -- context length; every yielded pair has this many tokens
-            subset     -- FineWeb-Edu config name (e.g. "sample-10BT", "default")
             rank       -- global rank of this process within the distributed job
             world_size -- total number of distributed processes
         """
         self.encoding = encoding
         self.seq_len = seq_len
-        self.subset = subset
         self.rank = rank
         self.world_size = world_size
 
     def __iter__(self):
         """
         Yield `(input_ids, target_ids)` tensors of length `seq_len` forever.
-
-        Inputs and targets are shifted by one for next-token prediction —
-        `target[i] == input[i + 1]`. Documents are concatenated into a rolling
-        buffer and sliced into fixed-length chunks, packing short docs together
-        and splitting long ones. This keeps every step at the same shape,
-        which under FSDP avoids recompute from variable-length inputs and
-        removes the need for a pad-aware attention mask.
         """
         worker = get_worker_info()
         num_workers = worker.num_workers if worker else 1
@@ -103,8 +99,8 @@ class FineWebEduDataset(IterableDataset):
         shard_index = self.rank * num_workers + worker_id
 
         ds = load_dataset(
-            "HuggingFaceFW/fineweb-edu",
-            name=self.subset,
+            "mlfoundations/dclm-baseline-1.0",
+            "default",
             split="train",
             streaming=True,
         ).shard(num_shards=total_shards, index=shard_index)
@@ -397,7 +393,6 @@ def main():
     log_every = 1
     ckpt_every = 100
     ckpt_dir = "checkpoints"
-    dataset_subset = "sample-10BT"  # → sample-100BT or "default" for full run
 
     if master:
         logger.info(
@@ -514,7 +509,7 @@ def main():
     # ------------------------------------------------------------------
     # Dataset + DataLoader
     # ------------------------------------------------------------------
-    dataset = FineWebEduDataset(encoding, seq_len, dataset_subset, rank, world_size)
+    dataset = DCLMDataset(encoding, seq_len, rank, world_size)
     loader = DataLoader(dataset, batch_size=micro_batch, num_workers=4, pin_memory=True)
 
     # ------------------------------------------------------------------
