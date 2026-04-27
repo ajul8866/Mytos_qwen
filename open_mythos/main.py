@@ -685,9 +685,9 @@ class LTIInjection(nn.Module):
             dim -- hidden state dimension; one scalar per channel for A and B
         """
         super().__init__()
-        self.log_A = nn.Parameter(torch.zeros(dim))  # log of A_continuous magnitude
+        self.log_A = nn.Parameter(torch.full((dim,), -4.6))  # A ≈ 0.99 (gentle decay)
         self.log_dt = nn.Parameter(torch.zeros(1))  # log of discretization step Δt
-        self.B = nn.Parameter(torch.ones(dim) * 0.1)
+        self.B = nn.Parameter(torch.ones(dim) * 0.01)  # small B so e doesn't dominate at init
 
     def get_A(self) -> torch.Tensor:
         """
