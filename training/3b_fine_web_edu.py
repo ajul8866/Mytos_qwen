@@ -415,7 +415,7 @@ def main():
         # Use ALL 28 Qwen layers: 14 prelude + 14 coda, 0 discarded
         cfg.prelude_layers = hf_cfg.num_hidden_layers // 2
         cfg.coda_layers = hf_cfg.num_hidden_layers - cfg.prelude_layers
-        cfg.max_loop_iters = 1  # minimal loop until RecurrentBlock is trained
+        cfg.max_loop_iters = 14  # 14 loops; LTI A≈0.99 preserves signal regardless of loop count
         # Override: fewer experts = faster training, less VRAM
         cfg.n_experts = 32
         cfg.n_shared_experts = 2
