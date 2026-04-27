@@ -371,7 +371,7 @@ def main():
     # ------------------------------------------------------------------
     # Tokenizer
     # ------------------------------------------------------------------
-    tokenizer_id = BASE_MODEL if BASE_MODEL else "openai/gpt-oss-20b"
+    tokenizer_id = BASE_MODEL or "unsloth/Qwen2.5-7B-Instruct"
     encoding = MythosTokenizer(model_id=tokenizer_id)
     vocab_size = encoding.vocab_size
 
