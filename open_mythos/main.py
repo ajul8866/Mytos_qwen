@@ -507,6 +507,9 @@ class MoEFFN(nn.Module):
         for shared in self.shared_experts:
             out = out + shared(flat)
 
+        # guard against numerical instability from random init
+        out = torch.nan_to_num(out, nan=0.0, posinf=1e4, neginf=-1e4)
+
         return out.view(B, T, D)
 
 
@@ -717,7 +720,8 @@ class LTIInjection(nn.Module):
             Updated hidden state of shape (B, T, dim)
         """
         A = self.get_A()
-        return A * h + self.B * e + transformer_out
+        out = A * h + self.B * e + transformer_out
+        return torch.nan_to_num(out, nan=0.0, posinf=1e4, neginf=-1e4)
 
 
 # ---------------------------------------------------------------------------
