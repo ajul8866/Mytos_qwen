@@ -43,10 +43,10 @@ from open_mythos.hybrid_loader import load_hf_weights, freeze_pretrained_layers
 # Set BASE_MODEL to a HuggingFace model ID to load pretrained weights into
 # Prelude / Coda / Embed.  Set None for random init (original behaviour).
 BASE_MODEL: str | None = "unsloth/Qwen2.5-7B-Instruct"
-FREEZE_PRELUDE = True
-FREEZE_CODA = True
-FREEZE_EMBED = True
-FREEZE_HEAD = True
+FREEZE_PRELUDE = False
+FREEZE_CODA = False
+FREEZE_EMBED = False
+FREEZE_HEAD = False
 # Gradient checkpointing — trades compute for VRAM; essential for recurrent blocks
 GRAD_CKPT = True
 
@@ -494,7 +494,7 @@ def main():
     # Optimizer
     # ------------------------------------------------------------------
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=lr, weight_decay=wd, betas=(0.9, 0.95), fused=False
+        model.parameters(), lr=lr, weight_decay=wd, betas=(0.9, 0.95), fused=True
     )
 
     # Dynamic loop curriculum: start at 1 loop, +1 every 100 steps, cap at cfg.max_loop_iters
