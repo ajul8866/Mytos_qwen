@@ -1008,8 +1008,9 @@ class OpenMythos(nn.Module):
         for i, layer in enumerate(self.prelude):
             x = layer(x, freqs_cis, mask, kv_cache, cache_key=f"prelude_{i}")
 
-        e = x  # encoded input frozen for injection every loop
-        x = self.recurrent(x, e, freqs_cis, mask, n_loops, kv_cache)
+        #e = x  # encoded input frozen for injection every loop
+        #x = self.recurrent(x, e, freqs_cis, mask, n_loops, kv_cache)
+        # DEBUG: bypass RecurrentBlock to diagnose high loss
 
         for i, layer in enumerate(self.coda):
             x = layer(x, freqs_cis, mask, kv_cache, cache_key=f"coda_{i}")
