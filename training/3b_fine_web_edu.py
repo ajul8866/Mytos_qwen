@@ -43,10 +43,10 @@ from open_mythos.hybrid_loader import load_hf_weights, freeze_pretrained_layers
 # Set BASE_MODEL to a HuggingFace model ID to load pretrained weights into
 # Prelude / Coda / Embed.  Set None for random init (original behaviour).
 BASE_MODEL: str | None = "unsloth/Qwen2.5-7B-Instruct"
-FREEZE_PRELUDE = False
-FREEZE_CODA = False
-FREEZE_EMBED = False
-FREEZE_HEAD = False
+FREEZE_PRELUDE = True
+FREEZE_CODA = True
+FREEZE_EMBED = True
+FREEZE_HEAD = True
 # Gradient checkpointing — trades compute for VRAM; essential for recurrent blocks
 GRAD_CKPT = True
 
@@ -408,7 +408,7 @@ def main():
         from transformers import AutoConfig
         hf_cfg = AutoConfig.from_pretrained(BASE_MODEL)
         cfg = from_hf_config(hf_cfg)
-        cfg.vocab_size = vocab_size
+        cfg.vocab_size = hf_cfg.vocab_size  # 152064 matches HF lm_head shape
         cfg.max_seq_len = seq_len
         cfg.max_output_tokens = seq_len
         cfg.grad_ckpt = GRAD_CKPT
