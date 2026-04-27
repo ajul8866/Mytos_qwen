@@ -581,6 +581,12 @@ def main():
                     f"  micro {micro_step+1}/{grad_accum} | loss {loss.item() * grad_accum:.4f}"
                 )
 
+        # Sanitise gradients — recurrent block is randomly initialised so
+        # early gradients can contain NaN from numerical instability.
+        for p in model.parameters():
+            if p.grad is not None:
+                p.grad = torch.nan_to_num(p.grad, nan=0.0, posinf=1e4, neginf=-1e4)
+
         # FSDP shards parameters, so `nn.utils.clip_grad_norm_` would clip
         # against each rank's local norm and miss the cross-shard gather.
         # FSDP.clip_grad_norm_ computes the true global norm and returns it.
