@@ -43,10 +43,10 @@ from open_mythos.hybrid_loader import load_hf_weights, freeze_pretrained_layers
 # Set BASE_MODEL to a HuggingFace model ID to load pretrained weights into
 # Prelude / Coda / Embed.  Set None for random init (original behaviour).
 BASE_MODEL: str | None = "unsloth/Qwen2.5-7B-Instruct"
-FREEZE_PRELUDE = True
-FREEZE_CODA = True
-FREEZE_EMBED = True
-FREEZE_HEAD = True
+FREEZE_PRELUDE = False
+FREEZE_CODA = False
+FREEZE_EMBED = False
+FREEZE_HEAD = False
 # Gradient checkpointing — trades compute for VRAM; essential for recurrent blocks
 GRAD_CKPT = True
 
@@ -415,7 +415,7 @@ def main():
         # Use ALL 28 Qwen layers: 14 prelude + 14 coda, 0 discarded
         cfg.prelude_layers = hf_cfg.num_hidden_layers // 2
         cfg.coda_layers = hf_cfg.num_hidden_layers - cfg.prelude_layers
-        cfg.max_loop_iters = 14  # 14 loops; LTI A≈0.99 preserves signal regardless of loop count
+        cfg.max_loop_iters = 14  # cap; start at 1 loop, +1 per 100 steps
         # Override: fewer experts = faster training, less VRAM
         cfg.n_experts = 32
         cfg.n_shared_experts = 2
@@ -494,8 +494,13 @@ def main():
     # Optimizer
     # ------------------------------------------------------------------
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=lr, weight_decay=wd, betas=(0.9, 0.95), fused=False
+        model.parameters(), lr=lr, weight_decay=wd, betas=(0.9, 0.95), fused=True
     )
+
+    # Dynamic loop curriculum: start at 1 loop, +1 every 100 steps, cap at cfg.max_loop_iters
+    current_loops = 1
+    if master:
+        logger.info(f"[LOOP] curriculum: start={current_loops} +1/100step cap={cfg.max_loop_iters}")
 
     # ------------------------------------------------------------------
     # Resume from latest checkpoint (if any)
@@ -554,7 +559,7 @@ def main():
                 else model.no_sync()
             )
             with sync, amp_ctx:
-                logits = model(x)
+                logits = model(x, n_loops=current_loops)
                 if step == start_step and micro_step == 0 and master:
                     with torch.no_grad():
                         ls = logits.detach().float()
@@ -576,6 +581,12 @@ def main():
                     f"  micro {micro_step+1}/{grad_accum} | loss {loss.item() * grad_accum:.4f}"
                 )
 
+        # Sanitise gradients — recurrent block is randomly initialised so
+        # early gradients can contain NaN from numerical instability.
+        for p in model.parameters():
+            if p.grad is not None:
+                p.grad = torch.nan_to_num(p.grad, nan=0.0, posinf=1e4, neginf=-1e4)
+
         # FSDP shards parameters, so `nn.utils.clip_grad_norm_` would clip
         # against each rank's local norm and miss the cross-shard gather.
         # FSDP.clip_grad_norm_ computes the true global norm and returns it.
@@ -585,6 +596,13 @@ def main():
             grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
         step += 1
+
+        # Loop curriculum: +1 loop every 100 steps, cap at max_loop_iters
+        new_loops = min(1 + step // 100, cfg.max_loop_iters)
+        if new_loops != current_loops:
+            current_loops = new_loops
+            if master:
+                logger.info(f"[LOOP] increased to {current_loops} loops at step {step}")
 
         if master and step % log_every == 0:
             dt = time.perf_counter() - t0

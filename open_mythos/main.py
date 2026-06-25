@@ -507,6 +507,9 @@ class MoEFFN(nn.Module):
         for shared in self.shared_experts:
             out = out + shared(flat)
 
+        # guard against numerical instability from random init
+        out = torch.nan_to_num(out, nan=0.0, posinf=1e4, neginf=-1e4)
+
         return out.view(B, T, D)
 
 
@@ -717,7 +720,8 @@ class LTIInjection(nn.Module):
             Updated hidden state of shape (B, T, dim)
         """
         A = self.get_A()
-        return A * h + self.B * e + transformer_out
+        out = A * h + self.B * e + transformer_out
+        return torch.nan_to_num(out, nan=0.0, posinf=1e4, neginf=-1e4)
 
 
 # ---------------------------------------------------------------------------
@@ -940,14 +944,6 @@ class OpenMythos(nn.Module):
         self.head.weight = self.embed.weight  # weight tying
 
         self._init_weights()
-        # Re-scale recurrent block after _init_weights overwrites it.
-        # The random block must start near-identity so it does not destroy
-        # pretrained Prelude/Coda representations during the first N steps.
-        with torch.no_grad():
-            for p in self.recurrent.block.parameters():
-                p.mul_(0.01)
-            for p in self.recurrent.lora.parameters():
-                p.mul_(0.01)
 
     def _init_weights(self) -> None:
         """Initialize all linear and embedding weights with N(0, 0.02)."""
